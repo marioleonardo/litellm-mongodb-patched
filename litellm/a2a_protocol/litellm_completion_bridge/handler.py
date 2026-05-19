@@ -114,8 +114,8 @@ class A2ACompletionBridgeHandler:
 
         if agent_extra_headers:
             completion_params["extra_headers"] = {
-                **(completion_params.get("extra_headers") or {}),
                 **agent_extra_headers,
+                **(completion_params.get("extra_headers") or {}),
             }
 
         # Call litellm.acompletion
@@ -231,8 +231,8 @@ class A2ACompletionBridgeHandler:
 
         if agent_extra_headers:
             completion_params["extra_headers"] = {
-                **(completion_params.get("extra_headers") or {}),
                 **agent_extra_headers,
+                **(completion_params.get("extra_headers") or {}),
             }
 
         # 1. Emit initial task event (kind: "task", status: "submitted")
