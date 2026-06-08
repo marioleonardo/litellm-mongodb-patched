@@ -1074,9 +1074,17 @@ def run_server(  # noqa: PLR0915
                 )
             db_connect_timeout = general_settings.get("database_connect_timeout")
             db_socket_timeout = general_settings.get("database_socket_timeout")
-            db_disable_prepared_statements = bool(
-                general_settings.get("database_disable_prepared_statements", False)
+            _disable_prepared_statements = general_settings.get(
+                "database_disable_prepared_statements", False
             )
+            if isinstance(_disable_prepared_statements, str):
+                from litellm.secret_managers.main import str_to_bool
+
+                db_disable_prepared_statements = (
+                    str_to_bool(_disable_prepared_statements) is True
+                )
+            else:
+                db_disable_prepared_statements = bool(_disable_prepared_statements)
             db_extra_connection_params = general_settings.get(
                 "database_extra_connection_params"
             )

@@ -825,6 +825,15 @@ class TestProxyInitializationHelpers:
         )
         assert params["pgbouncer"] == "false"
 
+    @pytest.mark.parametrize(
+        "config_value, expect_pgbouncer",
+        [
+            (True, True),
+            (False, False),
+            ("true", True),
+            ("false", False),
+        ],
+    )
     @patch("subprocess.run")
     @patch("atexit.register")
     @patch("litellm.proxy.db.prisma_client.PrismaManager.setup_database")
@@ -837,6 +846,8 @@ class TestProxyInitializationHelpers:
         mock_setup_db,
         mock_atexit_register,
         mock_subprocess_run,
+        config_value,
+        expect_pgbouncer,
     ):
         from click.testing import CliRunner
 
@@ -855,7 +866,7 @@ class TestProxyInitializationHelpers:
             return_value={
                 "general_settings": {
                     "database_url": "postgresql://test:test@localhost:5432/test",
-                    "database_disable_prepared_statements": True,
+                    "database_disable_prepared_statements": config_value,
                 }
             }
         )
@@ -899,7 +910,10 @@ class TestProxyInitializationHelpers:
             ), f"exit_code={result.exit_code}, output={result.output}"
             mock_append_query_params.assert_called()
             appended_params = mock_append_query_params.call_args.args[1]
-            assert appended_params["pgbouncer"] == "true"
+            if expect_pgbouncer:
+                assert appended_params["pgbouncer"] == "true"
+            else:
+                assert "pgbouncer" not in appended_params
 
     @patch("uvicorn.run")
     @patch("atexit.register")
