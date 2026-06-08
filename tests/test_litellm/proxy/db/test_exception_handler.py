@@ -107,6 +107,135 @@ def test_is_database_connection_generic_errors():
     )
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectionError("connection refused"),
+        TimeoutError("timed out"),
+        OSError("network is unreachable"),
+        asyncio.TimeoutError(),
+        HTTPClientClosedError(),
+        ClientNotConnectedError(),
+        PrismaError("can't reach database server"),
+        PrismaError(),
+    ],
+)
+def test_is_database_service_unavailable_error_infra_failures(error):
+    """Infrastructure-level failures (socket/connection/timeout, prisma
+    transport, unknown PrismaError) mean the DB could not answer, so auth
+    must surface 503 instead of treating a valid key as invalid."""
+    assert PrismaDBExceptionHandler.is_database_service_unavailable_error(error) is True
+
+
+def test_is_database_service_unavailable_error_prisma_p1001_masquerades_as_dataerror():
+    """Real-world regression: prisma-client-py raises the P1001 "can't reach
+    database server" connectivity failure as a DataError (a data-layer type).
+    A type-only check would miss it and return 401 during a genuine outage;
+    the message keyword must still classify it as service-unavailable -> 503."""
+    p1001_as_dataerror = DataError(
+        data={
+            "user_facing_error": {
+                "message": "Can't reach database server at `127.0.0.1`:`5499`",
+                "meta": {"table": "t"},
+            }
+        }
+    )
+    assert (
+        PrismaDBExceptionHandler.is_database_service_unavailable_error(
+            p1001_as_dataerror
+        )
+        is True
+    )
+
+
+def test_is_database_service_unavailable_error_cached_plan_escapes_as_503():
+    """Composes with the cached-plan retry: when that recovery fails and the
+    Postgres "cached plan must not change result type" error escapes (raised by
+    prisma as a data-layer RawQueryError), it is a transient stale-DB-state
+    condition, not an invalid key, so it must classify as service-unavailable
+    -> 503 rather than fall through to 401."""
+    cached_plan_error = RawQueryError(
+        data={
+            "user_facing_error": {
+                "message": "cached plan must not change result type",
+                "meta": {"table": "t"},
+            }
+        }
+    )
+    assert (
+        PrismaDBExceptionHandler.is_database_service_unavailable_error(
+            cached_plan_error
+        )
+        is True
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        DataError(data={"user_facing_error": {"meta": {"table": "t"}}}),
+        UniqueViolationError(data={"user_facing_error": {"meta": {"table": "t"}}}),
+        RecordNotFoundError(data={"user_facing_error": {"meta": {"table": "t"}}}),
+        Exception("some unrelated error"),
+        ValueError("bad value"),
+    ],
+)
+def test_is_database_service_unavailable_error_excludes_non_infra(error):
+    """Data-layer errors (the DB IS reachable and answered) and generic
+    non-DB errors must NOT be classified as service-unavailable, otherwise a
+    genuine 401 would be masked as a transient 503."""
+    assert (
+        PrismaDBExceptionHandler.is_database_service_unavailable_error(error) is False
+    )
+
+
+def test_is_database_service_unavailable_error_asyncpg(monkeypatch):
+    """asyncpg connection/interface errors map to service-unavailable. asyncpg
+    is not a hard dependency, so inject a stand-in module to exercise the
+    branch deterministically regardless of the install environment."""
+    import sys
+    import types
+
+    fake_asyncpg = types.ModuleType("asyncpg")
+    fake_exceptions = types.ModuleType("asyncpg.exceptions")
+
+    class PostgresConnectionError(Exception):
+        pass
+
+    class InterfaceError(Exception):
+        pass
+
+    class UniqueViolationError(Exception):  # data-layer, must stay False
+        pass
+
+    fake_exceptions.PostgresConnectionError = PostgresConnectionError
+    fake_exceptions.InterfaceError = InterfaceError
+    fake_exceptions.UniqueViolationError = UniqueViolationError
+    fake_asyncpg.exceptions = fake_exceptions
+
+    monkeypatch.setitem(sys.modules, "asyncpg", fake_asyncpg)
+    monkeypatch.setitem(sys.modules, "asyncpg.exceptions", fake_exceptions)
+
+    assert (
+        PrismaDBExceptionHandler.is_database_service_unavailable_error(
+            PostgresConnectionError("connection reset")
+        )
+        is True
+    )
+    assert (
+        PrismaDBExceptionHandler.is_database_service_unavailable_error(
+            InterfaceError("connection was closed")
+        )
+        is True
+    )
+    assert (
+        PrismaDBExceptionHandler.is_database_service_unavailable_error(
+            UniqueViolationError("duplicate key")
+        )
+        is False
+    )
+
+
 # Test should_allow_request_on_db_unavailable method
 @patch(
     "litellm.proxy.proxy_server.general_settings",

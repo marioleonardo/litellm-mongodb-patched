@@ -110,6 +110,56 @@ class PrismaDBExceptionHandler:
         return False
 
     @staticmethod
+    def is_database_service_unavailable_error(e: Exception) -> bool:
+        """True iff the exception means the database could not answer at the
+        infrastructure level (connection refused, socket/interface failure,
+        timeout) rather than a genuine auth failure (key not found) or a
+        data-layer error (the DB IS reachable and rejected the data).
+
+        Auth must answer 401 only for a key the DB confirms is invalid. When
+        the DB itself is unreachable, the request has to surface as 503 so
+        callers retry instead of treating valid keys as invalid during an
+        outage.
+
+        Note: prisma-client-py mislabels the P1001 "can't reach database
+        server" connectivity failure as a ``DataError`` (a data-layer type),
+        so a type-only check misses real outages. ``is_database_transport_error``
+        keyword-matches the connection message and catches that masquerade,
+        while genuine data errors (no connection keyword) correctly stay 401.
+
+        The Postgres "cached plan must not change result type" error is matched
+        here, not in ``is_database_transport_error``: it is a transient stale-DB-
+        state condition (not an invalid key), but the connection is healthy so it
+        must not trigger a reconnect.
+        """
+        import asyncio
+
+        if PrismaDBExceptionHandler.is_database_connection_error(e):
+            return True
+        if PrismaDBExceptionHandler.is_database_transport_error(e):
+            return True
+        if "cached plan must not change result type" in str(e).lower():
+            return True
+
+        # OSError already covers ConnectionError and (Py3.3+) TimeoutError.
+        # asyncio.TimeoutError is a distinct class before Py3.11.
+        if isinstance(e, (OSError, asyncio.TimeoutError)):
+            return True
+
+        try:
+            import asyncpg
+        except ImportError:
+            return False
+
+        return isinstance(
+            e,
+            (
+                asyncpg.exceptions.PostgresConnectionError,
+                asyncpg.exceptions.InterfaceError,
+            ),
+        )
+
+    @staticmethod
     def handle_db_exception(e: Exception):
         """
         Primary handler for `allow_requests_on_db_unavailable` flag. Decides whether to raise a DB Exception or not based on the flag.
