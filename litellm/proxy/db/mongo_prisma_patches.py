@@ -89,6 +89,7 @@ def _make_mongo_update(original_update: Callable, model_name: str) -> Callable:
     async def patched_update(*args: Any, **kwargs: Any) -> Any:
         where = kwargs.get("where")
         data = kwargs.get("data")
+        actions_self = args[0] if len(args) > 0 else None
         if len(args) > 1:
             data = args[1]
         if len(args) > 2:
@@ -97,7 +98,7 @@ def _make_mongo_update(original_update: Callable, model_name: str) -> Callable:
         if not isinstance(data, dict) or not isinstance(where, dict):
             return await original_update(*args, **kwargs)
 
-        # Handle key regeneration: token is being changed
+        # Handle key regeneration: token is being changed (MongoDB can't update _id)
         if model_name.lower().endswith("verificationtoken"):
             where_token = where.get("token")
             data_token = data.get("token")
@@ -108,25 +109,23 @@ def _make_mongo_update(original_update: Callable, model_name: str) -> Callable:
                     where_token[:16], data_token[:16]
                 )
                 try:
-                    # Read existing record
-                    existing = await original_update.__self__.find_unique(
-                        where={"token": where_token}
-                    )
+                    # Read existing record using the actions object (self)
+                    existing = await actions_self.find_unique(where={"token": where_token})
                     if existing:
-                        # Build new record dict
                         new_dict = existing.dict()
                         new_dict["token"] = data_token
-                        # Apply other data changes
                         for k, v in data.items():
                             if k != "token":
                                 new_dict[k] = v
                         # Delete old record
-                        await original_update.__self__.delete(
-                            where={"token": where_token}
-                        )
-                        # Create new record
+                        await actions_self.delete(where={"token": where_token})
+                        # Create new record (remove id field if present)
                         new_data = {k: v for k, v in new_dict.items() if k != "id"}
-                        return await original_update.__self__.create(data=new_data)
+                        result = await actions_self.create(data=new_data)
+                        verbose_proxy_logger.info(
+                            "MongoDB: delete+create for token change succeeded."
+                        )
+                        return result
                 except Exception as e:
                     verbose_proxy_logger.error(
                         "MongoDB: delete+create for token change failed: %s\n%s",
