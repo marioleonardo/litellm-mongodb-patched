@@ -4344,10 +4344,19 @@ async def _execute_virtual_key_regeneration(
         )
         if existing:
             existing_dict = existing.dict()
-            existing_dict["token"] = new_token_hash
+            # Apply updates on top of existing data
             for k, v in update_data.items():
                 existing_dict[k] = v
+            # Ensure token is the new hash
+            existing_dict["token"] = new_token_hash
+            # Clean the dict for Prisma create (remove id, jsonify nested dicts)
             new_data = {k: v for k, v in existing_dict.items() if k != "id"}
+            new_data = prisma_client.jsonify_object(data=new_data)
+            # Remove None budget_limits - Prisma MongoDB create rejects None for Json fields
+            if new_data.get("budget_limits") is None:
+                new_data.pop("budget_limits", None)
+            if new_data.get("model_max_budget") is None:
+                new_data.pop("model_max_budget", None)
             await prisma_client.db.litellm_verificationtoken.delete(
                 where={"token": hashed_api_key}
             )
