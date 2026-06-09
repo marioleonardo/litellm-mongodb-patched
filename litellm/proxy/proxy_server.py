@@ -598,10 +598,9 @@ except ImportError:
 
 server_root_path = get_server_root_path()
 _license_check = LicenseCheck()
-premium_user: bool = _license_check.is_premium()
-premium_user_data: Optional["EnterpriseLicenseData"] = (
-    _license_check.airgapped_license_data
-)
+# AI-Gateway patched: always premium, unlimited (MIT license fork)
+premium_user: bool = True
+premium_user_data: Optional["EnterpriseLicenseData"] = None
 global_max_parallel_request_retries_env: Optional[str] = os.getenv(
     "LITELLM_GLOBAL_MAX_PARALLEL_REQUEST_RETRIES"
 )
