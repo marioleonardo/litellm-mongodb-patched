@@ -3763,16 +3763,14 @@ class PrismaClient:
                 print_verbose(
                     "PrismaClient: Before upsert into litellm_verificationtoken"
                 )
-                new_verification_token = await self.db.litellm_verificationtoken.upsert(  # type: ignore
-                    where={
-                        "token": hashed_token,
-                    },
-                    data={
-                        "create": {**db_data},  # type: ignore
-                        "update": {},  # don't do anything if it already exists
-                    },
-                    include={"litellm_budget_table": True},
-                )
+                # MongoDB: skip include on upsert (not supported by Prisma MongoDB connector)
+                _upsert_kwargs = {
+                    "where": {"token": hashed_token},
+                    "data": {"create": {**db_data}, "update": {}},
+                }
+                if not (os.getenv("DATABASE_URL", "").startswith("mongodb://") or os.getenv("DATABASE_URL", "").startswith("mongodb+srv://")):
+                    _upsert_kwargs["include"] = {"litellm_budget_table": True}
+                new_verification_token = await self.db.litellm_verificationtoken.upsert(**_upsert_kwargs)
                 verbose_proxy_logger.info("Data Inserted into Keys Table")
                 return new_verification_token
             elif table_name == "user":
