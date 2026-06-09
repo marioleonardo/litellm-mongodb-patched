@@ -2,9 +2,14 @@
 Monkeypatches for Prisma Client Python to make upsert/update/create_many
 MongoDB-compatible. In MongoDB/Firestore, primary keys (@id mapped to _id)
 are immutable and cannot appear in the update section.
+
+Key regeneration: when token (the @id field) is being changed, we do a
+delete+create instead of an update since MongoDB doesn't allow _id changes.
 """
+import asyncio
 import functools
-from typing import Any, Callable, Coroutine
+import traceback
+from typing import Any, Callable
 
 from litellm._logging import verbose_proxy_logger
 
@@ -21,8 +26,8 @@ _PRIMARY_KEYS = frozenset({
 })
 
 
-def _strip_pk_from_dict(data: dict, where: Any, model_name: str) -> None:
-    """Strip primary keys from a data dict that are in the where clause or are known PKs."""
+def _strip_pk_from_data(data: dict, where: Any, model_name: str) -> None:
+    """Strip primary keys from data that are also in the where clause."""
     where_keys = []
     try:
         if hasattr(where, "keys"):
@@ -35,20 +40,24 @@ def _strip_pk_from_dict(data: dict, where: Any, model_name: str) -> None:
     for k in where_keys:
         if k in data:
             verbose_proxy_logger.debug(
-                "Popping lookup/where key '%s' from %s update payload", k, model_name
+                "Popping lookup/where key '%s' from %s payload", k, model_name
             )
             data.pop(k, None)
 
+
+def _strip_pk_from_data_aggressive(data: dict, where: Any, model_name: str) -> None:
+    """Strip ALL known primary keys from data (for upsert update section)."""
+    _strip_pk_from_data(data, where, model_name)
     for pk in _PRIMARY_KEYS:
         if pk in data:
             verbose_proxy_logger.debug(
-                "Popping immutable primary key '%s' from %s update payload", pk, model_name
+                "Popping immutable primary key '%s' from %s payload", pk, model_name
             )
             data.pop(pk, None)
 
 
 def _make_mongo_upsert(original_upsert: Callable, model_name: str) -> Callable:
-    """Wrap upsert to strip primary keys from the update section."""
+    """Wrap upsert to strip primary keys from the update section only."""
 
     @functools.wraps(original_upsert)
     async def patched_upsert(*args: Any, **kwargs: Any) -> Any:
@@ -62,7 +71,7 @@ def _make_mongo_upsert(original_upsert: Callable, model_name: str) -> Callable:
         if isinstance(data, dict):
             update_dict = data.get("update")
             if isinstance(update_dict, dict):
-                _strip_pk_from_dict(update_dict, where, model_name)
+                _strip_pk_from_data_aggressive(update_dict, where, model_name)
 
         return await original_upsert(*args, **kwargs)
 
@@ -70,7 +79,11 @@ def _make_mongo_upsert(original_upsert: Callable, model_name: str) -> Callable:
 
 
 def _make_mongo_update(original_update: Callable, model_name: str) -> Callable:
-    """Wrap update to strip primary keys from the data section."""
+    """Wrap update to handle MongoDB _id immutability.
+    
+    For regular updates, strip where-clause keys from data.
+    For key regeneration (token change), do delete+create pattern.
+    """
 
     @functools.wraps(original_update)
     async def patched_update(*args: Any, **kwargs: Any) -> Any:
@@ -81,8 +94,48 @@ def _make_mongo_update(original_update: Callable, model_name: str) -> Callable:
         if len(args) > 2:
             where = args[2]
 
-        if isinstance(data, dict):
-            _strip_pk_from_dict(data, where, model_name)
+        if not isinstance(data, dict) or not isinstance(where, dict):
+            return await original_update(*args, **kwargs)
+
+        # Handle key regeneration: token is being changed
+        if model_name.lower().endswith("verificationtoken"):
+            where_token = where.get("token")
+            data_token = data.get("token")
+            
+            if where_token and data_token and where_token != data_token:
+                verbose_proxy_logger.warning(
+                    "MongoDB: token change detected (%s -> %s). Using delete+create pattern.",
+                    where_token[:16], data_token[:16]
+                )
+                try:
+                    # Read existing record
+                    existing = await original_update.__self__.find_unique(
+                        where={"token": where_token}
+                    )
+                    if existing:
+                        # Build new record dict
+                        new_dict = existing.dict()
+                        new_dict["token"] = data_token
+                        # Apply other data changes
+                        for k, v in data.items():
+                            if k != "token":
+                                new_dict[k] = v
+                        # Delete old record
+                        await original_update.__self__.delete(
+                            where={"token": where_token}
+                        )
+                        # Create new record
+                        new_data = {k: v for k, v in new_dict.items() if k != "id"}
+                        return await original_update.__self__.create(data=new_data)
+                except Exception as e:
+                    verbose_proxy_logger.error(
+                        "MongoDB: delete+create for token change failed: %s\n%s",
+                        str(e), traceback.format_exc()
+                    )
+                    raise
+
+        # Regular update: strip where-clause keys from data
+        _strip_pk_from_data(data, where, model_name)
 
         return await original_update(*args, **kwargs)
 
@@ -100,7 +153,6 @@ def _make_mongo_create_many(original_create_many: Callable, model_name: str) -> 
             )
             kwargs.pop("skip_duplicates", None)
 
-        # Clean positional args
         new_args = list(args)
         if len(new_args) > 2:
             new_args = new_args[:2]
@@ -113,12 +165,7 @@ def _make_mongo_create_many(original_create_many: Callable, model_name: str) -> 
 
 
 def apply_mongo_prisma_action_patches() -> bool:
-    """
-    Apply MongoDB-compatible patches to Prisma action classes.
-    Strips immutable PKs from upsert/update and removes skip_duplicates from create_many.
-
-    Returns True if patches were applied, False otherwise.
-    """
+    """Apply MongoDB-compatible patches to Prisma action classes."""
     import os
     db_url = os.getenv("DATABASE_URL", "")
     if not (db_url.startswith("mongodb://") or db_url.startswith("mongodb+srv://")):
@@ -134,26 +181,25 @@ def apply_mongo_prisma_action_patches() -> bool:
 
             if hasattr(attr, "upsert") and callable(getattr(attr, "upsert")):
                 setattr(
-                    attr,
-                    "upsert",
+                    attr, "upsert",
                     _make_mongo_upsert(getattr(attr, "upsert"), attr_name),
                 )
 
             if hasattr(attr, "update") and callable(getattr(attr, "update")):
                 setattr(
-                    attr,
-                    "update",
+                    attr, "update",
                     _make_mongo_update(getattr(attr, "update"), attr_name),
                 )
 
             if hasattr(attr, "create_many") and callable(getattr(attr, "create_many")):
                 setattr(
-                    attr,
-                    "create_many",
+                    attr, "create_many",
                     _make_mongo_create_many(getattr(attr, "create_many"), attr_name),
                 )
 
-        verbose_proxy_logger.info("Applied MongoDB-compatible Prisma action patches (upsert/update/create_many).")
+        verbose_proxy_logger.info(
+            "Applied MongoDB-compatible Prisma action patches (upsert/update/create_many)."
+        )
         return True
     except Exception as e:
         verbose_proxy_logger.error(
