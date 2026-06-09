@@ -851,11 +851,6 @@ async def google_login(
             return admin_ui_disabled()
 
     ####### Check if user is a Enterprise / Premium User #######
-    if (
-        microsoft_client_id is not None
-        or google_client_id is not None
-        or generic_client_id is not None
-    ):
     # AI-Gateway patched: no SSO user limit enforcement (MIT license fork)
 
     ####### Detect DB + MASTER KEY in .env #######
