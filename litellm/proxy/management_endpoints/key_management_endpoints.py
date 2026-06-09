@@ -4344,19 +4344,31 @@ async def _execute_virtual_key_regeneration(
         )
         if existing:
             existing_dict = existing.dict()
-            # Apply updates on top of existing data
+            # Apply updates on top of existing data  
             for k, v in update_data.items():
                 existing_dict[k] = v
             # Ensure token is the new hash
             existing_dict["token"] = new_token_hash
-            # Clean the dict for Prisma create (remove id, jsonify nested dicts)
-            new_data = {k: v for k, v in existing_dict.items() if k != "id"}
+            # Clean the dict: strip None values, internal fields, and Prisma relation objects
+            skip_fields = {"id", "litellm_budget_table", "litellm_organization_table",
+                          "litellm_project_table", "object_permission", "jwt_key_mappings"}
+            new_data = {}
+            for k, v in existing_dict.items():
+                if k in skip_fields:
+                    continue
+                if v is None:
+                    continue
+                # Skip Prisma model objects (relations)
+                if hasattr(v, "dict") or hasattr(v, "__dict__"):
+                    continue
+                new_data[k] = v
+            # Ensure required JSON fields have defaults
+            for field in ("aliases", "config", "permissions", "metadata",
+                         "model_spend", "model_max_budget", "router_settings"):
+                if field not in new_data or new_data[field] is None:
+                    new_data[field] = {}
+            new_data.setdefault("spend", 0.0)
             new_data = prisma_client.jsonify_object(data=new_data)
-            # Remove None budget_limits - Prisma MongoDB create rejects None for Json fields
-            if new_data.get("budget_limits") is None:
-                new_data.pop("budget_limits", None)
-            if new_data.get("model_max_budget") is None:
-                new_data.pop("model_max_budget", None)
             await prisma_client.db.litellm_verificationtoken.delete(
                 where={"token": hashed_api_key}
             )
