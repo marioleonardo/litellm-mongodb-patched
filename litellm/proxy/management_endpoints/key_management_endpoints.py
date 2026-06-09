@@ -4335,10 +4335,32 @@ async def _execute_virtual_key_regeneration(
         grace_period=data.grace_period if data else None,
     )
 
-    updated_token = await prisma_client.db.litellm_verificationtoken.update(
-        where={"token": hashed_api_key},
-        data=update_data,  # type: ignore
-    )
+    # MongoDB: update doesn't support changing the _id (token) field.
+    # Use delete+create pattern when the token hash changes.
+    db_url = os.getenv("DATABASE_URL", "")
+    if db_url.startswith("mongodb://") or db_url.startswith("mongodb+srv://"):
+        existing = await prisma_client.db.litellm_verificationtoken.find_unique(
+            where={"token": hashed_api_key}
+        )
+        if existing:
+            existing_dict = existing.dict()
+            existing_dict["token"] = new_token_hash
+            for k, v in update_data.items():
+                existing_dict[k] = v
+            new_data = {k: v for k, v in existing_dict.items() if k != "id"}
+            await prisma_client.db.litellm_verificationtoken.delete(
+                where={"token": hashed_api_key}
+            )
+            updated_token = await prisma_client.db.litellm_verificationtoken.create(
+                data=new_data
+            )
+        else:
+            updated_token = None
+    else:
+        updated_token = await prisma_client.db.litellm_verificationtoken.update(
+            where={"token": hashed_api_key},
+            data=update_data,  # type: ignore
+        )
     updated_token_dict = dict(updated_token) if updated_token is not None else {}
     updated_token_dict["key"] = new_token
     updated_token_dict["token_id"] = updated_token_dict.pop("token")
