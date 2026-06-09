@@ -25,6 +25,12 @@ async def create_missing_views(db: _db):  # noqa: PLR0915
     If the view doesn't exist, one will be created.
     """
 
+    import os
+    db_url = os.getenv("DATABASE_URL", "")
+    if db_url.startswith("mongodb://") or db_url.startswith("mongodb+srv://"):
+        verbose_logger.debug("MongoDB detected, skipping PostgreSQL view creation.")
+        return
+
     try:
         # Try to select one row from the view
         await db.query_raw("""SELECT 1 FROM "LiteLLM_VerificationTokenView" LIMIT 1""")
@@ -233,6 +239,12 @@ async def should_create_missing_views(db: _db) -> bool:
 
     If SpendLogs table already has values, then don't create views on startup.
     """
+
+    import os
+    db_url = os.getenv("DATABASE_URL", "")
+    if db_url.startswith("mongodb://") or db_url.startswith("mongodb+srv://"):
+        verbose_logger.debug("MongoDB detected, skipping pg_class query.")
+        return False
 
     sql_query = """
     SELECT reltuples::BIGINT

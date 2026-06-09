@@ -2866,6 +2866,25 @@ class PrismaClient:
         self.iam_token_db_auth: Optional[bool] = str_to_bool(
             os.getenv("IAM_TOKEN_DB_AUTH")
         )
+        # MongoDB: strip unsupported query params (connection_limit, pool_timeout)
+        if database_url and (database_url.startswith("mongodb://") or database_url.startswith("mongodb+srv://")):
+            import urllib.parse as _urlparse
+            _parsed = _urlparse.urlparse(database_url)
+            _params = _urlparse.parse_qs(_parsed.query)
+            _removed = []
+            for _key in ("connection_limit", "pool_timeout"):
+                if _key in _params:
+                    _params.pop(_key, None)
+                    _removed.append(_key)
+            if _removed:
+                _new_query = _urlparse.urlencode(_params, doseq=True)
+                _cleaned = _urlparse.ParseResult(
+                    _parsed.scheme, _parsed.netloc, _parsed.path,
+                    _parsed.params, _new_query, _parsed.fragment
+                )
+                database_url = _urlparse.urlunparse(_cleaned)
+                os.environ["DATABASE_URL"] = database_url
+                verbose_proxy_logger.debug("Cleaned MongoDB DATABASE_URL params: %s", _removed)
         verbose_proxy_logger.debug("Creating Prisma Client..")
         try:
             from prisma import Prisma  # type: ignore

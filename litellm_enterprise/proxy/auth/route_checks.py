@@ -1,0 +1,2 @@
+class EnterpriseRouteChecks:
+    pass

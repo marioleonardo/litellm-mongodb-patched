@@ -217,9 +217,12 @@ async def responses_api(
         # Store in managed objects table if background mode is enabled
         if data.get("background") and isinstance(response, ResponsesAPIResponse):
             if response.status in ["queued", "in_progress"]:
-                from litellm_enterprise.proxy.hooks.managed_files import (  # type: ignore
-                    _PROXY_LiteLLMManagedFiles,
-                )
+                try:
+                    from litellm_enterprise.proxy.hooks.managed_files import (  # type: ignore
+                        _PROXY_LiteLLMManagedFiles,
+                    )
+                except ImportError:
+                    _PROXY_LiteLLMManagedFiles = None
 
                 managed_files_obj = cast(
                     Optional[_PROXY_LiteLLMManagedFiles],

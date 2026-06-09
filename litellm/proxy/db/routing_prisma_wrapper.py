@@ -192,6 +192,32 @@ class RoutingPrismaWrapper:
             )
         await self._reader.recreate_prisma_client(reader_url, http_client=http_client)
 
+    async def query_raw(self, query: str, *args: Any, **kwargs: Any) -> Any:
+        # MongoDB compatibility: intercept raw SQL and convert to ORM calls
+        from litellm.proxy.db.mongo_adapter import MongoQueryAdapter, is_mongodb
+        if is_mongodb():
+            adapter = MongoQueryAdapter(self._writer)
+            return await adapter.query_raw(query, *args, **kwargs)
+        target = self._writer if self._reader_unavailable else self._reader
+        return await target.query_raw(query, *args, **kwargs)
+
+    async def query_first(self, query: str, *args: Any, **kwargs: Any) -> Any:
+        # MongoDB compatibility: intercept raw SQL and convert to ORM calls
+        from litellm.proxy.db.mongo_adapter import MongoQueryAdapter, is_mongodb
+        if is_mongodb():
+            adapter = MongoQueryAdapter(self._writer)
+            return await adapter.query_first(query, *args, **kwargs)
+        target = self._writer if self._reader_unavailable else self._reader
+        return await target.query_first(query, *args, **kwargs)
+
+    async def execute_raw(self, query: str, *args: Any, **kwargs: Any) -> Any:
+        # MongoDB compatibility: skip raw SQL execution
+        from litellm.proxy.db.mongo_adapter import is_mongodb
+        if is_mongodb():
+            verbose_proxy_logger.debug("MongoDB: skipping execute_raw: %s", query[:200])
+            return None
+        return await self._writer.execute_raw(query, *args, **kwargs)
+
     def __getattr__(self, name: str) -> Any:
         if name in _TOP_LEVEL_READ_METHODS:
             target = self._writer if self._reader_unavailable else self._reader

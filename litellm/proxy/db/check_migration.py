@@ -95,6 +95,10 @@ def check_prisma_schema_diff(db_url: Optional[str] = None) -> None:
         db_url = os.getenv("DATABASE_URL")
         if db_url is None:
             raise Exception("DATABASE_URL not set")
+    # MongoDB: skip Prisma schema diff (Prisma CLI introspection not supported)
+    if db_url and (db_url.startswith("mongodb://") or db_url.startswith("mongodb+srv://")):
+        verbose_logger.debug("MongoDB detected, skipping Prisma schema diff check.")
+        return
     has_diff, message = check_prisma_schema_diff_helper(db_url)
     if has_diff:
         verbose_logger.exception(

@@ -455,6 +455,33 @@ class PrismaWrapper:
                     self._log_prefix,
                 )
 
+    async def query_raw(self, query: str, *args: Any, **kwargs: Any) -> Any:
+        # MongoDB compatibility: intercept raw SQL and convert to ORM calls
+        from litellm.proxy.db.mongo_adapter import MongoQueryAdapter, is_mongodb
+        if is_mongodb():
+            adapter = MongoQueryAdapter(self._original_prisma)
+            return await adapter.query_raw(query, *args, **kwargs)
+        original_attr = getattr(self._original_prisma, "query_raw")
+        return await original_attr(query, *args, **kwargs)
+
+    async def query_first(self, query: str, *args: Any, **kwargs: Any) -> Any:
+        # MongoDB compatibility: intercept raw SQL and convert to ORM calls
+        from litellm.proxy.db.mongo_adapter import MongoQueryAdapter, is_mongodb
+        if is_mongodb():
+            adapter = MongoQueryAdapter(self._original_prisma)
+            return await adapter.query_first(query, *args, **kwargs)
+        original_attr = getattr(self._original_prisma, "query_first")
+        return await original_attr(query, *args, **kwargs)
+
+    async def execute_raw(self, query: str, *args: Any, **kwargs: Any) -> Any:
+        # MongoDB compatibility: skip raw SQL execution
+        from litellm.proxy.db.mongo_adapter import is_mongodb
+        if is_mongodb():
+            verbose_proxy_logger.debug("MongoDB: skipping execute_raw: %s", query[:200])
+            return None
+        original_attr = getattr(self._original_prisma, "execute_raw")
+        return await original_attr(query, *args, **kwargs)
+
     def __getattr__(self, name: str):
         """
         Proxy attribute access to the underlying Prisma client.
@@ -543,6 +570,11 @@ class PrismaManager:
         Returns:
             bool: True if setup was successful, False otherwise
         """
+        # MongoDB: skip prisma db push (managed by Firestore schema provisioning)
+        db_url = os.getenv("DATABASE_URL", "")
+        if db_url.startswith("mongodb://") or db_url.startswith("mongodb+srv://"):
+            verbose_proxy_logger.debug("MongoDB detected, skipping prisma db push.")
+            return True
 
         for attempt in range(4):
             original_dir = os.getcwd()

@@ -1123,6 +1123,20 @@ def run_server(  # noqa: PLR0915
                         connection_url_params,
                     )
                     os.environ["DATABASE_URL"] = modified_url
+                # MongoDB compatibility: strip connection_limit and pool_timeout
+                # which are not supported by Prisma's MongoDB driver
+                if modified_url and (modified_url.startswith("mongodb://") or modified_url.startswith("mongodb+srv://")):
+                    import urllib.parse as _urlparse
+                    _parsed = _urlparse.urlparse(modified_url)
+                    _params = _urlparse.parse_qs(_parsed.query)
+                    _params.pop("connection_limit", None)
+                    _params.pop("pool_timeout", None)
+                    _new_query = _urlparse.urlencode(_params, doseq=True)
+                    _cleaned = _urlparse.ParseResult(
+                        _parsed.scheme, _parsed.netloc, _parsed.path,
+                        _parsed.params, _new_query, _parsed.fragment
+                    )
+                    os.environ["DATABASE_URL"] = _urlparse.urlunparse(_cleaned)
                 if os.getenv("DIRECT_URL", None) is not None:
                     database_url = os.getenv("DIRECT_URL")
                     modified_url = append_query_params(

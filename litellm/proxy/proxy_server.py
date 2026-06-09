@@ -8043,6 +8043,15 @@ class ProxyStartupEvent:
                         )
                     raise e
 
+                ## Apply MongoDB adapter for raw SQL query compatibility ##
+                from litellm.proxy.db.mongo_adapter import patch_prisma_for_mongodb
+                if hasattr(prisma_client, 'db'):
+                    patch_prisma_for_mongodb(prisma_client.db)
+
+                ## Apply MongoDB Prisma action patches for upsert/update/create_many ##
+                from litellm.proxy.db.mongo_prisma_patches import apply_mongo_prisma_action_patches
+                apply_mongo_prisma_action_patches()
+
                 ## Start RDS IAM token refresh background task if enabled ##
                 # This proactively refreshes IAM tokens before they expire,
                 # preventing the 15-minute connection failure bug (#16220)
