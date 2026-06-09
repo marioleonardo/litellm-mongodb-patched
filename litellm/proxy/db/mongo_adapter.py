@@ -3,11 +3,17 @@ MongoDB query adapter for LiteLLM.
 Converts PostgreSQL raw SQL queries to MongoDB-compatible Prisma ORM operations.
 Since MongoDB / Firestore does not support raw SQL, we intercept query_raw 
 and query_first calls and translate them to native Prisma operations.
+
+ALL DB errors are logged at ERROR level for Cloud Run visibility.
 """
 import os
 import re
+import traceback
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
+
+from litellm._logging import verbose_proxy_logger
+
 
 def is_mongodb() -> bool:
     """Check if the database is MongoDB."""
@@ -23,9 +29,8 @@ class MongoQueryAdapter:
     
     async def query_raw(self, query: str, *args, **kwargs) -> List[Dict[str, Any]]:
         """Intercept query_raw calls and convert to ORM when possible."""
-        from litellm import verbose_logger
         
-        verbose_logger.debug(f"MongoDB adapter: intercepted query_raw: {query[:200]}")
+        verbose_proxy_logger.debug(f"MongoDB adapter: intercepted query_raw: {query[:200]}")
         query_lower = query.lower() if isinstance(query, str) else ""
         
         # Handle view existence checks - views don't exist in MongoDB
@@ -42,32 +47,46 @@ class MongoQueryAdapter:
         
         # Handle spend analytics queries (LiteLLM_SpendLogs)
         if '"LiteLLM_SpendLogs"' in query or '"litellm_spendlogs"' in query_lower:
-            return await self._handle_spend_logs_query(query, *args)
+            verbose_proxy_logger.warning(
+                "MongoDB adapter: spend logs raw query intercepted, returning empty. "
+                "Use ORM endpoints for spend data. Query: %s", query[:200]
+            )
+            return []
             
         # Handle user listing queries
         if '"LiteLLM_UserTable"' in query and 'LEFT JOIN' in query:
-            return await self._handle_user_listing_query(query, *args)
+            verbose_proxy_logger.warning(
+                "MongoDB adapter: user listing JOIN query intercepted, returning empty. "
+                "Query: %s", query[:200]
+            )
+            return []
             
         # Handle verification token queries
         if '"LiteLLM_VerificationToken"' in query:
-            return await self._handle_verification_token_query(query, *args)
+            verbose_proxy_logger.warning(
+                "MongoDB adapter: verification token raw query intercepted. "
+                "Query: %s", query[:200]
+            )
+            return []
             
         # Handle error logs queries
         if '"LiteLLM_ErrorLogs"' in query:
             return []
             
-        # For unknown queries, return empty list
-        verbose_logger.warning(f"MongoDB adapter: unhandled query pattern: {query[:200]}")
+        # For unknown queries, log and return empty
+        verbose_proxy_logger.error(
+            "MongoDB adapter: UNHANDLED query_raw pattern! "
+            "This may cause missing data. Query: %s", query[:300]
+        )
         return []
     
     async def query_first(self, query: str, *args, **kwargs) -> Optional[Dict[str, Any]]:
         """Intercept query_first calls - primarily used for token verification."""
-        from litellm import verbose_logger
         
-        verbose_logger.debug(f"MongoDB adapter: intercepted query_first: {query[:200]}")
+        verbose_proxy_logger.debug(f"MongoDB adapter: intercepted query_first: {query[:200]}")
         query_lower = query.lower() if isinstance(query, str) else ""
         
-        # Handle verification token lookup with team/budget joins
+        # Handle verification token lookup with team/budget joins (combined_view)
         if "litellm_verificationtoken" in query_lower and "litellm_teamtable" in query_lower:
             return await self._handle_verification_token_first(query, *args, **kwargs)
         
@@ -78,12 +97,15 @@ class MongoQueryAdapter:
         # Handle SELECT 1 checks
         if "select 1" in query_lower:
             return {"1": 1}
-            
+        
+        verbose_proxy_logger.error(
+            "MongoDB adapter: UNHANDLED query_first pattern! "
+            "This may cause auth failures. Query: %s", query[:300]
+        )
         return None
     
     async def _handle_verification_token_first(self, query: str, *args, **kwargs) -> Optional[Dict]:
         """Handle the complex verification token + team + budget JOIN query."""
-        from litellm import verbose_logger
         
         token_hash = None
         
@@ -102,7 +124,15 @@ class MongoQueryAdapter:
                 token_hash = m.group(1)
         
         if not token_hash:
+            verbose_proxy_logger.error(
+                "MongoDB adapter: could not extract token hash from query_first. "
+                "Query: %s, args: %s", query[:200], str(args)[:200]
+            )
             return None
+        
+        verbose_proxy_logger.debug(
+            "MongoDB adapter: looking up token hash %s", token_hash
+        )
         
         # Fetch token record
         try:
@@ -110,11 +140,23 @@ class MongoQueryAdapter:
                 where={"token": token_hash}
             )
         except Exception as e:
-            verbose_logger.error(f"Error fetching token: {e}")
+            verbose_proxy_logger.error(
+                "MongoDB adapter: ERROR fetching token %s: %s\n%s",
+                token_hash, str(e), traceback.format_exc()
+            )
             return None
             
         if not token_record:
+            verbose_proxy_logger.warning(
+                "MongoDB adapter: token NOT FOUND in DB: %s", token_hash
+            )
             return None
+        
+        verbose_proxy_logger.debug(
+            "MongoDB adapter: token found. user_id=%s, team_id=%s",
+            getattr(token_record, "user_id", None),
+            getattr(token_record, "team_id", None)
+        )
         
         res = token_record.dict()
         
@@ -161,7 +203,10 @@ class MongoQueryAdapter:
                     if t.litellm_model_table:
                         res["team_model_aliases"] = t.litellm_model_table.aliases
             except Exception as e:
-                verbose_logger.debug(f"Error fetching team: {e}")
+                verbose_proxy_logger.error(
+                    "MongoDB adapter: error fetching team %s: %s\n%s",
+                    token_record.team_id, str(e), traceback.format_exc()
+                )
         
         # Fetch project data
         if token_record.project_id:
@@ -172,7 +217,10 @@ class MongoQueryAdapter:
                 if p:
                     res["project_alias"] = p.project_alias
             except Exception as e:
-                verbose_logger.debug(f"Error fetching project: {e}")
+                verbose_proxy_logger.error(
+                    "MongoDB adapter: error fetching project %s: %s",
+                    token_record.project_id, str(e)
+                )
         
         # Fetch team membership
         if token_record.team_id and token_record.user_id:
@@ -193,7 +241,9 @@ class MongoQueryAdapter:
                             res["team_member_tpm_limit"] = b.tpm_limit
                             res["team_member_rpm_limit"] = b.rpm_limit
             except Exception as e:
-                verbose_logger.debug(f"Error fetching team membership: {e}")
+                verbose_proxy_logger.error(
+                    "MongoDB adapter: error fetching team membership: %s", str(e)
+                )
         
         # Fetch budget data
         if token_record.budget_id:
@@ -208,7 +258,10 @@ class MongoQueryAdapter:
                     res["litellm_budget_table_model_max_budget"] = b.model_max_budget
                     res["litellm_budget_table_soft_budget"] = b.soft_budget
             except Exception as e:
-                verbose_logger.debug(f"Error fetching budget: {e}")
+                verbose_proxy_logger.error(
+                    "MongoDB adapter: error fetching budget %s: %s",
+                    token_record.budget_id, str(e)
+                )
         
         # Fetch organization data
         if token_record.organization_id:
@@ -225,7 +278,10 @@ class MongoQueryAdapter:
                         res["organization_tpm_limit"] = o.litellm_budget_table.tpm_limit
                         res["organization_rpm_limit"] = o.litellm_budget_table.rpm_limit
             except Exception as e:
-                verbose_logger.debug(f"Error fetching organization: {e}")
+                verbose_proxy_logger.error(
+                    "MongoDB adapter: error fetching org %s: %s",
+                    token_record.organization_id, str(e)
+                )
         
         res["token"] = token_hash
         return res
@@ -234,19 +290,25 @@ class MongoQueryAdapter:
         """Handle simple token lookup queries."""
         token_hash = args[0] if args else None
         if not token_hash:
+            verbose_proxy_logger.error("MongoDB adapter: no token hash for simple lookup")
             return None
         try:
             record = await self.db.litellm_verificationtoken.find_unique(
                 where={"token": token_hash}
             )
-            return record.dict() if record else None
-        except Exception:
+            if record:
+                return record.dict()
+            verbose_proxy_logger.warning("MongoDB adapter: simple token lookup not found: %s", token_hash)
+            return None
+        except Exception as e:
+            verbose_proxy_logger.error(
+                "MongoDB adapter: error in simple token lookup %s: %s\n%s",
+                token_hash, str(e), traceback.format_exc()
+            )
             return None
     
     async def _handle_spend_logs_query(self, query: str, *args) -> List[Dict]:
         """Handle spend analytics queries by returning empty results."""
-        # For most spend analytics, we return empty data for MongoDB
-        # Real spend tracking should use the Prisma ORM methods directly
         return []
     
     async def _handle_user_listing_query(self, query: str, *args) -> List[Dict]:
@@ -265,11 +327,9 @@ def patch_prisma_for_mongodb(prisma_client_or_db):
     
     adapter = MongoQueryAdapter(prisma_client_or_db)
     
-    # Store original methods
     original_query_raw = getattr(prisma_client_or_db, "query_raw", None)
     original_query_first = getattr(prisma_client_or_db, "query_first", None)
     
-    # Replace with MongoDB-compatible versions
     async def mongo_query_raw(query: str, *args, **kwargs):
         return await adapter.query_raw(query, *args, **kwargs)
     
@@ -278,8 +338,6 @@ def patch_prisma_for_mongodb(prisma_client_or_db):
     
     prisma_client_or_db.query_raw = mongo_query_raw
     prisma_client_or_db.query_first = mongo_query_first
-    
-    # Also store originals for fallback
     prisma_client_or_db._original_query_raw = original_query_raw
     prisma_client_or_db._original_query_first = original_query_first
     

@@ -156,5 +156,8 @@ def apply_mongo_prisma_action_patches() -> bool:
         verbose_proxy_logger.info("Applied MongoDB-compatible Prisma action patches (upsert/update/create_many).")
         return True
     except Exception as e:
-        verbose_proxy_logger.error("Failed to apply MongoDB Prisma action patches: %s", e)
+        verbose_proxy_logger.error(
+            "FAILED to apply MongoDB Prisma action patches: %s\n%s",
+            str(e), traceback.format_exc()
+        )
         return False
